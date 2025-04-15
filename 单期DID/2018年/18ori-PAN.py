@@ -1,16 +1,17 @@
 import os
-import re
 import pandas as pd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 
+# 日志函数，增加文件写入功能
 log_file = "process_log.txt"
 
 def log_step(message):
-    print(f"[INFO] {message}")
-    with open(log_file, "a") as f:
+    print(f"[INFO] {message}")  # 控制台输出
+    with open(log_file, "a") as f:  # 写入日志文件
         f.write(f"[INFO] {message}\n")
 
 # 清空日志文件（在脚本开始时调用一次）
@@ -49,13 +50,13 @@ def load_social_factors(file_path, output_dir):
     """
     # 标准化处理
     scaler = StandardScaler()
-    factor_columns = ["EDUCATION", "INCOME", "POPULATION", "TRANSPORT", "COMMERCIAL", "RESIDENTIAL", "ROADVOLUME"]
+    factor_columns = ["EDUCATION", "INCOME", "POPULATION", "TRANSPORT", "COMMERCIAL", "RESIDENTIAL" ]
     factors_df[factor_columns] = scaler.fit_transform(factors_df[factor_columns])
     log_step("社会因子数据标准化完成")
-    """
+   """
     # 归一化处理
     scaler = MinMaxScaler()
-    factor_columns = ["EDUCATION", "INCOME", "POPULATION", "TRANSPORT", "COMMERCIAL", "RESIDENTIAL", "ROADVOLUME"]
+    factor_columns = ["EDUCATION", "INCOME", "POPULATION", "TRANSPORT", "COMMERCIAL", "RESIDENTIAL", "PANDEMIC"]
     factors_df[factor_columns] = scaler.fit_transform(factors_df[factor_columns])
     log_step("社会因子数据归一化完成")
     """
@@ -72,84 +73,73 @@ def load_treat_policy(file_path):
     df = pd.read_excel(file_path)
     log_step("TREAT_POLICY数据加载完成")
     return df
-# 原有数据加载函数保持不变...
 
 def run_did_analysis(traffic_path, factors_path, treat_path, output_dir):
     log_step("开始运行DiD分析...")
-    
-    # 加载并合并数据（保持原有逻辑不变）
+    # 加载数据
     traffic_df = load_traffic_data(traffic_path)
     factors_df = load_social_factors(factors_path, output_dir)
     treat_df = load_treat_policy(treat_path)
     
+    # 合并数据
     df = traffic_df.merge(factors_df, on=["COD_DIS", "COD_BAR", "DATE"], how="left")
     df = df.merge(treat_df, on=["COD_DIS", "COD_BAR"], how="left")
     log_step("数据合并完成")
     
-    # 新增相对月份计算
-    policy_date = pd.to_datetime('2018-12-01')
-    df['rel_month'] = (df['DATE'].dt.to_period('M') - policy_date.to_period('M')).apply(lambda x: x.n)
+    # 设定 POLICY（2018年12月之后为1，否则为0）
+    df['POLICY'] = (df['DATE'] >= '2018-12-01').astype(int)
+    log_step("POLICY 变量设定完成")
     
-    # 原有DID模型保持不变...
+    # 确保 TREATMENT 列存在
+    if 'TREAT_POLICY' not in df.columns:
+        log_step("错误: 数据缺少 'TREAT_POLICY' 列")
+        raise ValueError("数据缺少 'TREAT_POLICY' 列，请添加该列来标识受影响区域。")
     
-    # ========== 新增平行趋势检验 ==========
-    log_step("开始平行趋势检验...")
+    # 计算交互项 TREAT × POLICY
+    df['TREAT_POLICY_INTERACT'] = df['TREAT_POLICY'] * df['POLICY']
+    log_step("交互项计算完成")
     
-    # 生成动态处理效应模型
-    formula_pt = (
-        "ACCIDENT_RATE ~ TREAT_POLICY * C(rel_month, Treatment(-1)) + "
-        "EDUCATION + INCOME + POPULATION + TRANSPORT + COMMERCIAL + RESIDENTIAL + ROADVOLUME + "
-        "C(COD_BAR, Treatment(1))"
-    )
+    # 建立回归模型
+    formula = "ACCIDENT_RATE ~ TREAT_POLICY + POLICY + TREAT_POLICY_INTERACT + EDUCATION + INCOME + POPULATION + TRANSPORT + COMMERCIAL + RESIDENTIAL + PANDEMIC + C(COD_BAR, Treatment(1)) + C(DATE, Treatment(1))"
+    model = smf.ols(formula, data=df).fit(cov_type='cluster', cov_kwds={'groups': df['COD_BAR']})
+    log_step("回归模型拟合完成")
     
-    model_pt = smf.ols(formula_pt, data=df).fit(
-        cov_type='cluster', 
-        cov_kwds={'groups': df['COD_BAR']}
-    )
+    # 计算模型统计指标
+    model_stats = {
+        "R-squared": model.rsquared,
+        "Adj. R-squared": model.rsquared_adj,
+        "F-statistic": model.fvalue,
+        "Prob (F-statistic)": model.f_pvalue,
+        "AIC": model.aic,
+        "BIC": model.bic
+    }
+    log_step("模型统计指标计算完成")
     
-    # 提取系数结果
-    results_pt = pd.DataFrame({
-        'Variable': model_pt.params.index,
-        'Coefficient': model_pt.params.values,
-        'Std.Error': model_pt.bse.values,
-        't-Statistic': model_pt.tvalues.values,
-        'P-Value': model_pt.pvalues.values
+    # 创建输出目录（如果不存在）
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        log_step("输出目录创建完成")
+    
+    # 生成时间戳
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(output_dir, f"DID_results_{timestamp}.xlsx")
+    
+    # 保存结果到 Excel
+    results_df = pd.DataFrame({
+        'Variable': model.params.index,
+        'Coefficient': model.params.values,
+        'Std. Error': model.bse.values,
+        't-Statistic': model.tvalues.values,
+        'P-Value': model.pvalues.values
     })
     
-    # 提取政策前系数
-    pre_coeffs = []
-    pattern = re.compile(r'\[T\.(-?\d+)\]')
-    for var in model_pt.params.index:
-        if 'TREAT_POLICY:C(rel_month' in var:
-            match = pattern.search(var)
-            if match:
-                m = int(match.group(1))
-                if m < -1:  # 排除基准期-1
-                    pre_coeffs.append(var)
+    stats_df = pd.DataFrame(model_stats.items(), columns=['Statistic', 'Value'])
     
-    # 执行联合检验
-    test_result = {}
-    if pre_coeffs:
-        joint_test = model_pt.wald_test(pre_coeffs)
-        test_result = {
-            'F-Statistic': joint_test.statistic,
-            'P-Value': joint_test.pvalue,
-            'Num_Coefficients': len(pre_coeffs)
-        }
-    else:
-        test_result = {'Error': 'No pre-treatment coefficients found'}
-    
-    # 保存结果
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    pt_path = os.path.join(output_dir, f"Parallel_Trends_Results_{timestamp}.xlsx")
-    
-    with pd.ExcelWriter(pt_path) as writer:
-        results_pt.to_excel(writer, sheet_name='Dynamic_Coefficients', index=False)
-        pd.DataFrame([test_result]).to_excel(writer, sheet_name='Joint_Test', index=False)
-    
-    log_step(f"平行趋势检验结果已保存至 {pt_path}")
-    return model_pt.summary()
+    with pd.ExcelWriter(output_path) as writer:
+        results_df.to_excel(writer, sheet_name='DID Results', index=False)
+        stats_df.to_excel(writer, sheet_name='Model Statistics', index=False)
+    log_step(f"DiD 结果已保存至 {output_path}")
+    return model.summary()
 
 # 示例调用
-run_did_analysis("TrafficAccident_18.xlsx", "CONTROL_ADD_18.xlsx", "MARK_18.xlsx", "did_results_18")
-# 其余辅助函数保持不变...
+run_did_analysis("TrafficAccident_18.xlsx", "CONTROL_ADD_PAND_18.xlsx", "MARK_18.xlsx", "did_results_18")
