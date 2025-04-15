@@ -1,7 +1,7 @@
 # Madrid Data Research | 马德里数据研究
 
 This project involves analyzing various datasets related to traffic accidents in Madrid. The analysis uses Difference-in-Differences (DID) methods and conducts robustness checks using multiple time windows and parallel tests. The results are stored in Excel files, and Python scripts are used for data processing and statistical analysis.  
-本项目涉及对与马德里交通事故相关的各种数据集进行分析。分析采用了差异化法（DID）方法，并通过多个时间窗口和平行检验进行稳健性检验。结果存储在 Excel 文件中，使用 Python 脚本进行数据处理和统计分析。
+本项目涉及对与马德里交通事故相关的各种数据集进行分析。分析采用了DID方法，并通过多个时间窗口和平行检验进行稳健性检验。结果存储在 Excel 文件中，使用 Python 脚本进行数据处理和统计分析。
 
 ## Project Structure | 项目结构
 
